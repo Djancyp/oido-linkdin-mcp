@@ -1,0 +1,32 @@
+{
+  "name": "oido-linkedin",
+  "version": "1.0.0",
+  "description": "Manage LinkedIn company pages, messaging, connections, and content via MCP.",
+  "runtime": "make build",
+  "mcpServers": {
+    "oido-linkedin": {
+      "command": "${extensionPath}/oido-linkedin-mcp",
+      "args": [],
+      "env": {
+        "LINKEDIN_COOKIE": "${LINKEDIN_COOKIE}",
+        "LINKEDIN_BASE_URL": "${LINKEDIN_BASE_URL}"
+      }
+    }
+  },
+  "contextFileName": "OIDO.md",
+  "excludeTools": [],
+  "settings": [
+    {
+      "name": "LINKEDIN_COOKIE",
+      "description": "Full cookie string from LinkedIn — open devtools (F12) → Network tab → any linkedin.com request → copy the Cookie header value",
+      "defaultValue": "",
+      "type": "string"
+    },
+    {
+      "name": "LINKEDIN_BASE_URL",
+      "description": "LinkedIn base URL (leave default unless using a proxy)",
+      "defaultValue": "https://www.linkedin.com",
+      "type": "string"
+    }
+  ]
+}

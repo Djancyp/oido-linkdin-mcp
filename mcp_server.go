@@ -319,9 +319,9 @@ func (h *MCPHandler) HandleSearchPosts(_ context.Context, _ *mcp.CallToolRequest
 func RunMCPServer() {
 	client, err := NewLinkedInClient()
 	if err != nil {
-		log.Printf("Warning: LinkedIn client init failed: %v", err)
-		client = &LinkedInClient{httpClient: nil}
+		log.Fatalf("LinkedIn client init failed: %v", err)
 	}
+	defer client.Close()
 
 	handler := NewMCPHandler(client)
 

@@ -52,8 +52,15 @@ func ensureBrowser(baseURL string) (*browserState, error) {
 		return nil, fmt.Errorf("JSESSIONID missing from LINKEDIN_COOKIE — paste the full cookie string including JSESSIONID")
 	}
 
-	l := launcher.New().Headless(true).NoSandbox(true)
-	if path, found := launcher.LookPath(); found {
+	l := launcher.New().
+		Headless(true).
+		NoSandbox(true).
+		Set("disable-dev-shm-usage", "").
+		Set("disable-gpu", "")
+	// CHROME_BIN env lets Docker/CI pin the exact binary path
+	if bin := os.Getenv("CHROME_BIN"); bin != "" {
+		l = l.Bin(bin)
+	} else if path, found := launcher.LookPath(); found {
 		l = l.Bin(path)
 	}
 	u, err := l.Launch()

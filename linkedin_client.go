@@ -39,7 +39,13 @@ func NewLinkedInClient() (*LinkedInClient, error) {
 		baseURL:   baseURL,
 		cookie:    cookie,
 		csrfToken: csrfToken,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{
+			// Never follow redirects — a redirect means LinkedIn rejected auth (→ login page).
+			// Surfacing the 302 as an error is cleaner than an infinite redirect loop.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
@@ -83,8 +89,12 @@ func (c *LinkedInClient) newRequest(method, path string, body []byte) (*http.Req
 	req.Header.Set("Csrf-Token", c.csrfToken)
 	req.Header.Set("X-RestLi-Protocol-Version", "2.0.0")
 	req.Header.Set("X-Li-Lang", "en_US")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Accept", "application/vnd.linkedin.normalized+json+2.1")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -97,6 +107,12 @@ func (c *LinkedInClient) do(req *http.Request) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		loc := resp.Header.Get("Location")
+		return nil, resp.StatusCode, fmt.Errorf("HTTP %d redirect to %s — session expired or LINKEDIN_COOKIE invalid; refresh cookie from browser devtools", resp.StatusCode, loc)
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
@@ -237,7 +253,7 @@ func (c *LinkedInClient) ListConversations(limit int) (json.RawMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	path := fmt.Sprintf("/voyager/api/messaging/conversations?keyVersion=LEGACY_INBOX&q=participants&limit=%d", limit)
+	path := fmt.Sprintf("/voyager/api/messaging/conversations?keyVersion=LEGACY_INBOX&limit=%d", limit)
 	return c.get(path)
 }
 

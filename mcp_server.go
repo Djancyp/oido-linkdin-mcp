@@ -19,6 +19,16 @@ func NewMCPHandler(client *LinkedInClient) *MCPHandler {
 
 // --- Arg types ---
 
+type GetAuthURLArgs struct {
+	RedirectURI string   `json:"redirect_uri"      jsonschema:"Your app's redirect URI registered in LinkedIn Developer Portal"`
+	Scopes      []string `json:"scopes,omitempty" jsonschema:"OAuth scopes (default: openid profile email w_member_social r_organization_social w_organization_social rw_organization_admin)"`
+}
+
+type ExchangeCodeArgs struct {
+	Code        string `json:"code"         jsonschema:"Authorization code from LinkedIn redirect callback"`
+	RedirectURI string `json:"redirect_uri" jsonschema:"Must match the redirect_uri used in linkedin_get_auth_url"`
+}
+
 type GetCompanyArgs struct {
 	CompanyID string `json:"company_id" jsonschema:"Company universal name or numeric ID (e.g. 'microsoft' or '1035')"`
 }
@@ -119,6 +129,38 @@ func rawResult(data []byte) *mcp.CallToolResult {
 		return textResult(string(data))
 	}
 	return jsonResult(v)
+}
+
+// --- OAuth handlers ---
+
+func (h *MCPHandler) HandleGetAuthURL(_ context.Context, _ *mcp.CallToolRequest, args GetAuthURLArgs) (*mcp.CallToolResult, any, error) {
+	if args.RedirectURI == "" {
+		return errResult("redirect_uri is required"), nil, nil
+	}
+	u, err := h.client.GetAuthURL(args.RedirectURI, args.Scopes)
+	if err != nil {
+		return errResult(err.Error()), nil, nil
+	}
+	return textResult(fmt.Sprintf("Visit this URL to authorise the app:\n\n%s\n\nAfter redirect, copy the 'code' query param and call linkedin_exchange_code.", u)), nil, nil
+}
+
+func (h *MCPHandler) HandleExchangeCode(_ context.Context, _ *mcp.CallToolRequest, args ExchangeCodeArgs) (*mcp.CallToolResult, any, error) {
+	if args.Code == "" {
+		return errResult("code is required"), nil, nil
+	}
+	if args.RedirectURI == "" {
+		return errResult("redirect_uri is required"), nil, nil
+	}
+	result, err := h.client.ExchangeCode(args.Code, args.RedirectURI)
+	if err != nil {
+		return errResult(err.Error()), nil, nil
+	}
+	token, _ := result["access_token"].(string)
+	expires, _ := result["expires_in"].(float64)
+	return textResult(fmt.Sprintf(
+		"Token obtained successfully.\n\naccess_token: %s\nexpires_in: %.0f seconds\n\nSet LINKEDIN_ACCESS_TOKEN=%s in your extension settings.",
+		token, expires, token,
+	)), nil, nil
 }
 
 // --- Company handlers ---
@@ -326,6 +368,16 @@ func RunMCPServer() {
 		Name:    "oido-linkedin",
 		Version: "1.0.0",
 	}, nil)
+
+	// --- OAuth tools ---
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "linkedin_get_auth_url",
+		Description: "Generate the LinkedIn OAuth2 authorization URL. Visit the URL in a browser, approve access, then copy the 'code' from the redirect URL and call linkedin_exchange_code.",
+	}, handler.HandleGetAuthURL)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "linkedin_exchange_code",
+		Description: "Exchange the OAuth2 authorization code for an access token. Set the returned access_token as LINKEDIN_ACCESS_TOKEN in extension settings.",
+	}, handler.HandleExchangeCode)
 
 	// --- Company tools ---
 	mcp.AddTool(server, &mcp.Tool{

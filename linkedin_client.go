@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,33 +12,26 @@ import (
 	"time"
 )
 
+const (
+	authURL  = "https://www.linkedin.com/oauth/v2/authorization"
+	tokenURL = "https://www.linkedin.com/oauth/v2/accessToken"
+	apiBase  = "https://api.linkedin.com/v2"
+)
+
 type LinkedInClient struct {
-	baseURL    string
-	cookie     string
-	csrfToken  string
-	httpClient *http.Client
+	clientID     string
+	clientSecret string
+	accessToken  string
+	httpClient   *http.Client
 }
 
 func NewLinkedInClient() *LinkedInClient {
-	baseURL := os.Getenv("LINKEDIN_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://www.linkedin.com"
-	}
-
-	cookie := os.Getenv("LINKEDIN_COOKIE")
-	if cookie == "" {
-		log.Println("Warning: LINKEDIN_COOKIE not set — tools will error until configured.")
-	}
-
-	csrfToken := strings.Trim(extractCookieValue(cookie, "JSESSIONID"), `"`)
-
 	return &LinkedInClient{
-		baseURL:   baseURL,
-		cookie:    cookie,
-		csrfToken: csrfToken,
+		clientID:     os.Getenv("LINKEDIN_CLIENT_ID"),
+		clientSecret: os.Getenv("LINKEDIN_CLIENT_SECRET"),
+		accessToken:  os.Getenv("LINKEDIN_ACCESS_TOKEN"),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
-			// Never follow redirects — a redirect means the session is rejected.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -50,17 +42,74 @@ func NewLinkedInClient() *LinkedInClient {
 func (c *LinkedInClient) Close() {}
 
 func (c *LinkedInClient) checkConfigured() error {
-	if c.cookie == "" {
-		return fmt.Errorf("LINKEDIN_COOKIE not set — paste full cookie string from browser devtools (linkedin.com, not developer.linkedin.com)")
-	}
-	if c.csrfToken == "" {
-		return fmt.Errorf("JSESSIONID missing from LINKEDIN_COOKIE — make sure you copy the full cookie header")
+	if c.accessToken == "" {
+		return fmt.Errorf("LINKEDIN_ACCESS_TOKEN not set — use linkedin_get_auth_url to start OAuth flow, then linkedin_exchange_code to get a token")
 	}
 	return nil
 }
 
+func (c *LinkedInClient) checkApp() error {
+	if c.clientID == "" || c.clientSecret == "" {
+		return fmt.Errorf("LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET must be set")
+	}
+	return nil
+}
+
+// --- OAuth helpers ---
+
+func (c *LinkedInClient) GetAuthURL(redirectURI string, scopes []string) (string, error) {
+	if err := c.checkApp(); err != nil {
+		return "", err
+	}
+	if len(scopes) == 0 {
+		scopes = []string{"openid", "profile", "email", "w_member_social", "r_organization_social", "w_organization_social", "rw_organization_admin"}
+	}
+	params := url.Values{}
+	params.Set("response_type", "code")
+	params.Set("client_id", c.clientID)
+	params.Set("redirect_uri", redirectURI)
+	params.Set("scope", strings.Join(scopes, " "))
+	params.Set("state", fmt.Sprintf("%d", time.Now().UnixMilli()))
+	return authURL + "?" + params.Encode(), nil
+}
+
+func (c *LinkedInClient) ExchangeCode(code, redirectURI string) (map[string]interface{}, error) {
+	if err := c.checkApp(); err != nil {
+		return nil, err
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
+	form.Set("client_id", c.clientID)
+	form.Set("client_secret", c.clientSecret)
+
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token exchange failed HTTP %d: %s", resp.StatusCode, string(data))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// --- HTTP helpers ---
+
 func (c *LinkedInClient) newRequest(method, path string, body []byte) (*http.Request, error) {
-	u := c.baseURL + path
+	u := apiBase + path
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -69,22 +118,10 @@ func (c *LinkedInClient) newRequest(method, path string, body []byte) (*http.Req
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Cookie", c.cookie)
-	req.Header.Set("Csrf-Token", c.csrfToken)
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 	req.Header.Set("X-RestLi-Protocol-Version", "2.0.0")
-	req.Header.Set("X-Li-Lang", "en_US")
-	req.Header.Set("X-Li-Track", `{"clientVersion":"1.13.14698","mpVersion":"1.13.14698","osName":"web","timezoneOffset":0,"timezone":"UTC","deviceFormFactor":"DESKTOP","mpName":"voyager-web"}`)
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Accept", "application/vnd.linkedin.normalized+json+2.1")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Linux"`)
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Referer", c.baseURL+"/feed/")
+	req.Header.Set("LinkedIn-Version", "202401")
+	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -97,18 +134,12 @@ func (c *LinkedInClient) do(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
-		loc := resp.Header.Get("Location")
-		return nil, fmt.Errorf("session expired or invalid cookie — LinkedIn redirected to %s. Re-copy the Cookie header from linkedin.com devtools", loc)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("access token expired or invalid — re-run linkedin_exchange_code to get a new token")
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(data), 300))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(data), 400))
 	}
 	return data, nil
 }
@@ -151,45 +182,19 @@ func (c *LinkedInClient) doDelete(path string) error {
 	return err
 }
 
-// --- Cookie helpers ---
+var errNotAvailable = fmt.Errorf("this operation requires LinkedIn Partner Program access (Messaging/Connections API) — not available via standard OAuth2")
 
-func extractCookieValue(cookieStr, name string) string {
-	for _, part := range strings.Split(cookieStr, ";") {
-		part = strings.TrimSpace(part)
-		idx := strings.IndexByte(part, '=')
-		if idx < 0 {
-			continue
-		}
-		k := strings.TrimSpace(part[:idx])
-		v := strings.TrimSpace(part[idx+1:])
-		if k == name {
-			return v
-		}
-	}
-	return ""
-}
+// --- Profile ---
 
-// --- Types ---
-
-type Company struct {
-	ID          string `json:"entityUrn"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Website     string `json:"website,omitempty"`
-}
-
-type Profile struct {
-	EntityUrn string `json:"entityUrn"`
-	FirstName string `json:"firstName"`
-	LastName  string `json:"lastName"`
-	Headline  string `json:"headline,omitempty"`
-	PublicID  string `json:"publicIdentifier,omitempty"`
+func (c *LinkedInClient) GetMe() (json.RawMessage, error) {
+	data, err := c.get("/me")
+	return json.RawMessage(data), err
 }
 
 // --- Company ---
 
 func (c *LinkedInClient) GetCompany(companyID string) (json.RawMessage, error) {
-	path := fmt.Sprintf("/voyager/api/organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-12&q=universalName&universalName=%s", url.QueryEscape(companyID))
+	path := fmt.Sprintf("/organizations/%s", url.PathEscape(companyID))
 	data, err := c.get(path)
 	return json.RawMessage(data), err
 }
@@ -217,139 +222,43 @@ func (c *LinkedInClient) PostAsCompany(companyURN, text string, mediaURNs []stri
 		share["shareMediaCategory"] = "IMAGE"
 		share["media"] = media
 	}
-	data, err := c.post("/voyager/api/ugcPosts", content)
+	data, err := c.post("/ugcPosts", content)
 	return json.RawMessage(data), err
 }
 
-// --- Messaging ---
+// --- Messaging (Partner API only) ---
 
-func (c *LinkedInClient) ListConversations(limit int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/messaging/conversations?keyVersion=LEGACY_INBOX&limit=%d", limit)
-	data, err := c.get(path)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) ListConversations(_ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
+}
+func (c *LinkedInClient) GetConversation(_ string, _ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
+}
+func (c *LinkedInClient) SendMessage(_, _ string) (json.RawMessage, error) {
+	return nil, errNotAvailable
+}
+func (c *LinkedInClient) NewConversation(_, _ string) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
 
-func (c *LinkedInClient) GetConversation(conversationID string, limit int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/messaging/conversations/%s/events?keyVersion=LEGACY_INBOX&limit=%d", url.PathEscape(conversationID), limit)
-	data, err := c.get(path)
-	return json.RawMessage(data), err
-}
+// --- Connections (Partner API only) ---
 
-func (c *LinkedInClient) SendMessage(conversationID, text string) (json.RawMessage, error) {
-	payload := map[string]interface{}{
-		"eventCreate": map[string]interface{}{
-			"value": map[string]interface{}{
-				"com.linkedin.voyager.messaging.create.MessageCreate": map[string]interface{}{
-					"attributedBody": map[string]interface{}{
-						"text":       text,
-						"attributes": []interface{}{},
-					},
-					"attachments": []interface{}{},
-				},
-			},
-		},
-	}
-	path := fmt.Sprintf("/voyager/api/messaging/conversations/%s/events", url.PathEscape(conversationID))
-	data, err := c.post(path, payload)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) ListConnections(_, _ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
-
-func (c *LinkedInClient) NewConversation(recipientURN, text string) (json.RawMessage, error) {
-	payload := map[string]interface{}{
-		"keyVersion": "LEGACY_INBOX",
-		"conversationCreate": map[string]interface{}{
-			"recipients": []string{recipientURN},
-			"eventCreate": map[string]interface{}{
-				"value": map[string]interface{}{
-					"com.linkedin.voyager.messaging.create.MessageCreate": map[string]interface{}{
-						"attributedBody": map[string]interface{}{
-							"text":       text,
-							"attributes": []interface{}{},
-						},
-						"attachments": []interface{}{},
-					},
-				},
-			},
-		},
-	}
-	data, err := c.post("/voyager/api/messaging/conversations", payload)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) SendConnectionRequest(_, _ string) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
-
-// --- Connections ---
-
-func (c *LinkedInClient) ListConnections(limit, start int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/relationships/dash/connections?decorationId=com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithProfile-5&count=%d&start=%d&q=viewer&sortType=RECENTLY_CONNECTED", limit, start)
-	data, err := c.get(path)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) ListPendingRequests(_ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
-
-func (c *LinkedInClient) SendConnectionRequest(profileURN, message string) (json.RawMessage, error) {
-	payload := map[string]interface{}{
-		"trackingID": generateTrackingID(),
-		"invitations": []map[string]interface{}{
-			{
-				"trackingID": generateTrackingID(),
-				"invitee": map[string]interface{}{
-					"com.linkedin.voyager.growth.invitation.InviteeProfile": map[string]string{
-						"profileID": profileURN,
-					},
-				},
-				"message":       message,
-				"customMessage": message != "",
-			},
-		},
-	}
-	data, err := c.post("/voyager/api/growth/normInvitations", payload)
-	return json.RawMessage(data), err
-}
-
-func (c *LinkedInClient) ListPendingRequests(limit int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/relationships/sentInvitationViewsV2?invitationType=CONNECTION&limit=%d&q=relationship&relationshipType=SENT_RECEIVED&start=0", limit)
-	data, err := c.get(path)
-	return json.RawMessage(data), err
-}
-
-func (c *LinkedInClient) WithdrawRequest(invitationID, sharedSecret string) error {
-	payload := map[string]interface{}{
-		"invitationID":        invitationID,
-		"sharedSecret":        sharedSecret,
-		"isGenericInvitation": false,
-	}
-	_, err := c.post("/voyager/api/relationships/invitations/"+invitationID+"?action=withdraw", payload)
-	return err
-}
-
-func (c *LinkedInClient) AcceptRequest(invitationID, sharedSecret string) error {
-	payload := map[string]interface{}{
-		"invitationID": invitationID,
-		"sharedSecret": sharedSecret,
-	}
-	_, err := c.post("/voyager/api/relationships/invitations/"+invitationID+"?action=accept", payload)
-	return err
-}
+func (c *LinkedInClient) WithdrawRequest(_, _ string) error { return errNotAvailable }
+func (c *LinkedInClient) AcceptRequest(_, _ string) error   { return errNotAvailable }
 
 // --- Content ---
 
-func (c *LinkedInClient) GetFeed(limit int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/feed/updatesV2?includeLongTermActivities=true&limit=%d&q=chronological&start=0&updatesTab=ALL_UPDATES", limit)
-	data, err := c.get(path)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) GetFeed(_ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
 
 func (c *LinkedInClient) CreatePost(authorURN, text string) (json.RawMessage, error) {
@@ -366,42 +275,55 @@ func (c *LinkedInClient) CreatePost(authorURN, text string) (json.RawMessage, er
 			"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC",
 		},
 	}
-	data, err := c.post("/voyager/api/ugcPosts", payload)
+	data, err := c.post("/ugcPosts", payload)
 	return json.RawMessage(data), err
 }
 
 func (c *LinkedInClient) LikePost(activityURN string) error {
-	payload := map[string]interface{}{"reactionType": "LIKE"}
-	_, err := c.post(fmt.Sprintf("/voyager/api/reactions?action=like&urnId=%s", url.QueryEscape(activityURN)), payload)
+	payload := map[string]interface{}{
+		"actor":     "",
+		"object":    activityURN,
+		"reactionType": "LIKE",
+	}
+	_, err := c.post(fmt.Sprintf("/socialActions/%s/likes", url.PathEscape(activityURN)), payload)
 	return err
 }
 
 func (c *LinkedInClient) CommentOnPost(activityURN, text string) (json.RawMessage, error) {
 	payload := map[string]interface{}{
-		"actor": "",
+		"actor":  "",
+		"object": activityURN,
 		"message": map[string]interface{}{
-			"text":       text,
-			"attributes": []interface{}{},
+			"text": text,
 		},
 	}
-	path := fmt.Sprintf("/voyager/api/feed/comments?updateKey=%s", url.QueryEscape(activityURN))
+	path := fmt.Sprintf("/socialActions/%s/comments", url.PathEscape(activityURN))
 	data, err := c.post(path, payload)
 	return json.RawMessage(data), err
 }
 
-func (c *LinkedInClient) SearchPosts(keywords string, limit int) (json.RawMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	path := fmt.Sprintf("/voyager/api/search/hits?decorationId=com.linkedin.voyager.deco.search.SearchClusterCollection-6&count=%d&filters=List()&origin=GLOBAL_SEARCH_HEADER&q=all&query=%s&queryContext=List(spellCorrectionEnabled->true)&start=0", limit, url.QueryEscape(keywords))
-	data, err := c.get(path)
-	return json.RawMessage(data), err
+func (c *LinkedInClient) SearchPosts(_ string, _ int) (json.RawMessage, error) {
+	return nil, errNotAvailable
 }
 
 // --- Helpers ---
 
 func generateTrackingID() string {
 	return fmt.Sprintf("%d", time.Now().UnixMilli())
+}
+
+func extractCookieValue(cookieStr, name string) string {
+	for _, part := range strings.Split(cookieStr, ";") {
+		part = strings.TrimSpace(part)
+		idx := strings.IndexByte(part, '=')
+		if idx < 0 {
+			continue
+		}
+		if strings.TrimSpace(part[:idx]) == name {
+			return strings.TrimSpace(part[idx+1:])
+		}
+	}
+	return ""
 }
 
 func truncateStr(s string, max int) string {

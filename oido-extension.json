@@ -1,6 +1,6 @@
 {
   "name": "oido-linkedin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Manage LinkedIn company pages, messaging, connections, and content via MCP.",
   "runtime": "make build",
   "mcpServers": {
@@ -8,7 +8,9 @@
       "command": "${extensionPath}/oido-linkedin-mcp",
       "args": [],
       "env": {
-        "LINKEDIN_COOKIE": "${LINKEDIN_COOKIE}",
+        "LINKEDIN_CLIENT_ID": "${LINKEDIN_CLIENT_ID}",
+        "LINKEDIN_CLIENT_SECRET": "${LINKEDIN_CLIENT_SECRET}",
+        "LINKEDIN_ACCESS_TOKEN": "${LINKEDIN_ACCESS_TOKEN}",
         "LINKEDIN_BASE_URL": "${LINKEDIN_BASE_URL}"
       }
     }
@@ -17,8 +19,20 @@
   "excludeTools": [],
   "settings": [
     {
-      "name": "LINKEDIN_COOKIE",
-      "description": "Full cookie string from LinkedIn — open devtools (F12) → Network tab → any linkedin.com request → copy the Cookie header value",
+      "name": "LINKEDIN_CLIENT_ID",
+      "description": "LinkedIn app Client ID — from LinkedIn Developer Portal → your app → Auth",
+      "defaultValue": "",
+      "type": "string"
+    },
+    {
+      "name": "LINKEDIN_CLIENT_SECRET",
+      "description": "LinkedIn app Primary Client Secret — from LinkedIn Developer Portal → your app → Auth",
+      "defaultValue": "",
+      "type": "string"
+    },
+    {
+      "name": "LINKEDIN_ACCESS_TOKEN",
+      "description": "OAuth2 access token — run linkedin_get_auth_url then linkedin_exchange_code to get one",
       "defaultValue": "",
       "type": "string"
     },

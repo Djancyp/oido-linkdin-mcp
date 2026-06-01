@@ -14,16 +14,32 @@ import (
 )
 
 type LinkedInClient struct {
-	baseURL   string
+	baseURL string
+	// cookie and csrfToken are read from env on first use (lazy init)
+	ready bool
+}
+
+// browserState holds the live browser session — initialized lazily on first tool call.
+type browserState struct {
 	csrfToken string
 	browser   *rod.Browser
 	page      *rod.Page
 }
 
-func NewLinkedInClient() (*LinkedInClient, error) {
+var bs *browserState
+
+func NewLinkedInClient() *LinkedInClient {
 	baseURL := os.Getenv("LINKEDIN_BASE_URL")
 	if baseURL == "" {
 		baseURL = "https://www.linkedin.com"
+	}
+	return &LinkedInClient{baseURL: baseURL}
+}
+
+// ensureBrowser launches Chrome and injects cookies on first call.
+func ensureBrowser(baseURL string) (*browserState, error) {
+	if bs != nil {
+		return bs, nil
 	}
 
 	cookie := os.Getenv("LINKEDIN_COOKIE")
@@ -36,7 +52,6 @@ func NewLinkedInClient() (*LinkedInClient, error) {
 		return nil, fmt.Errorf("JSESSIONID missing from LINKEDIN_COOKIE — paste the full cookie string including JSESSIONID")
 	}
 
-	// Prefer system Chrome; fall back to rod auto-download
 	l := launcher.New().Headless(true).NoSandbox(true)
 	if path, found := launcher.LookPath(); found {
 		l = l.Bin(path)
@@ -48,7 +63,6 @@ func NewLinkedInClient() (*LinkedInClient, error) {
 
 	browser := rod.New().ControlURL(u).MustConnect()
 
-	// Inject cookies before navigating so LinkedIn sees them on first request
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open page: %w", err)
@@ -58,46 +72,45 @@ func NewLinkedInClient() (*LinkedInClient, error) {
 		return nil, fmt.Errorf("failed to set cookies: %w", err)
 	}
 
-	// Navigate to LinkedIn to establish same-origin context for fetch() calls
 	if err := page.Navigate(baseURL); err != nil {
 		log.Printf("Warning: initial LinkedIn navigation failed: %v", err)
 	}
 	_ = page.WaitLoad()
 
-	return &LinkedInClient{
-		baseURL:   baseURL,
-		csrfToken: csrfToken,
-		browser:   browser,
-		page:      page,
-	}, nil
+	bs = &browserState{csrfToken: csrfToken, browser: browser, page: page}
+	log.Println("Browser session ready.")
+	return bs, nil
 }
 
 func (c *LinkedInClient) Close() {
-	if c.browser != nil {
-		_ = c.browser.Close()
+	if bs != nil && bs.browser != nil {
+		_ = bs.browser.Close()
+		bs = nil
 	}
 }
 
 // eval runs an async JS function in the browser context and returns the text result.
-func (c *LinkedInClient) eval(script string) (string, error) {
-	res, err := c.page.Eval(script)
+func eval(b *browserState, script string) (string, error) {
+	res, err := b.page.Eval(script)
 	if err != nil {
 		return "", err
 	}
-	// res.Value is gson.JSON; .Str() returns string if the JS value is a string type.
-	// If JS returned an object/number, marshal to JSON string instead.
 	s := res.Value.Str()
 	if s == "" {
 		raw := res.Value.Raw()
-		b, err2 := json.Marshal(raw)
+		b2, err2 := json.Marshal(raw)
 		if err2 == nil {
-			s = string(b)
+			s = string(b2)
 		}
 	}
 	return s, nil
 }
 
 func (c *LinkedInClient) get(path string) ([]byte, error) {
+	b, err := ensureBrowser(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
 	u := c.baseURL + path
 	script := fmt.Sprintf(`async () => {
 		const r = await fetch(%q, {
@@ -115,9 +128,8 @@ func (c *LinkedInClient) get(path string) ([]byte, error) {
 			throw new Error('HTTP ' + r.status + ': ' + body.slice(0, 300));
 		}
 		return r.text();
-	}`, u, c.csrfToken)
-
-	text, err := c.eval(script)
+	}`, u, b.csrfToken)
+	text, err := eval(b, script)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +137,10 @@ func (c *LinkedInClient) get(path string) ([]byte, error) {
 }
 
 func (c *LinkedInClient) post(path string, payload interface{}) ([]byte, error) {
+	b, err := ensureBrowser(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -149,9 +165,8 @@ func (c *LinkedInClient) post(path string, payload interface{}) ([]byte, error) 
 			throw new Error('HTTP ' + r.status + ': ' + body.slice(0, 300));
 		}
 		return r.text();
-	}`, u, c.csrfToken, string(bodyBytes))
-
-	text, err := c.eval(script)
+	}`, u, b.csrfToken, string(bodyBytes))
+	text, err := eval(b, script)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +174,10 @@ func (c *LinkedInClient) post(path string, payload interface{}) ([]byte, error) 
 }
 
 func (c *LinkedInClient) doDelete(path string) error {
+	b, err := ensureBrowser(c.baseURL)
+	if err != nil {
+		return err
+	}
 	u := c.baseURL + path
 	script := fmt.Sprintf(`async () => {
 		const r = await fetch(%q, {
@@ -177,8 +196,8 @@ func (c *LinkedInClient) doDelete(path string) error {
 			throw new Error('HTTP ' + r.status + ': ' + body.slice(0, 300));
 		}
 		return r.text();
-	}`, u, c.csrfToken)
-	_, err := c.eval(script)
+	}`, u, b.csrfToken)
+	_, err = eval(b, script)
 	return err
 }
 
